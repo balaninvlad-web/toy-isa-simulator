@@ -1,142 +1,129 @@
-# TOY ISA 6 — Симулятор + DSL-ассемблер + JIT
+# TOY-ISA Simulator
 
-Учебный проект по курсу «Симуляция ЦП и ОС».
-Реализован с нуля: ассемблер на Ruby (DSL), симулятор на C++ с поддержкой ELF,
-интерпретатор с BB-кэшем и динамическая двоичная трансляция (DBT) через AsmJit.
+A cycle-accurate simulator for the TOY instruction set architecture (ISA) with a Ruby-based DSL assembler and an AsmJit-backed dynamic binary translator (DBT).
 
+The project demonstrates the full toolchain: assembly source -> ELF binary -> CPU simulation (interpreter or JIT).
 
-## Что умеет
+## Requirements
 
-### Ассемблер (Ruby DSL)
-- Программы пишутся как Ruby-код: li r1, 42, add r3, r1, r2, beq r1, r2, :loop.
-- Все 15 инструкций TOY ISA 6: LI, ADDI, ADD, MOVZ, MOVN, SELC, CLS, SSAT, SBIT,
-  LD, ST, STP, BEQ, J, SYSCALL.
-- Метки и fixups (разрешение адресов в save_elf).
-- Генерация ELF32 (e_machine = 0xFF00, один PT_LOAD, p_vaddr = 0).
-- Псевдоинструкции: mov (=li), hlt (=li r8, 93 + syscall), add r1, 5 (=addi).
+- C++17 compiler (GCC 11+ via MSYS2 UCRT64 or MinGW-w64)
+- CMake 3.20+
+- Ruby 3.0+
+- AsmJit library (install via pacman -S mingw-w64-ucrt-x86_64-asmjit)
 
-### Симулятор (C++)
-- Загрузка ELF через ELFIO с валидацией: ELF32, little-endian, e_machine == 0xFF00.
-- Интерпретатор: decode -> execute, знаковое расширение setx<From,To>.
-- BB-кэш: unordered_map<pc, BasicBlock>, exec_count для порога горячести.
-- DBT (AsmJit): генерация x86-64 для каждого блока, кэш трансляций bt_cache.
-- SMC: инвалидация трансляций при записи в код.
-- Semihosting syscall: 1 = print_int, 2 = read_int, 64 = write, 93 = exit.
-- ABI-независимость: #if defined(_WIN32) выбирает RCX (Windows) или RDI (Linux).
+## Build & Run
 
+### Build
 
-## Структура
+Build the project in release mode:
 
-dsl.rb                — Ruby-ассемблер (DSL + энкодер ELF32)
-program.rb            — Пример программы на ассемблере
-fib.rb                — Fibonacci с вводом N
-bench.rb              — Бенчмарк: 3M инструкций, 1 горячий цикл
-bench2.rb             — Бенчмарк: 50 блоков × 20K исполнений
-bench3.rb             — Бенчмарк: hot (20K) + cold (100)
+    make all
 
-main_types.hpp        — Общие типы: Instruction, CpuState, Memory, setx<>
-main.cpp              — decode, execute, run, syscall, exception, benchmark
-generate_block.hpp    — Объявление generate_block
-generate_block.cpp    — DBT: AsmJit-кодогенерация + C++-хелперы (dbt_ld, dbt_st, …)
-elf_loader.hpp/.cpp   — Загрузка ELF через ELFIO
+Or directly through CMake:
 
-tests.cpp             — Unit-тесты (без gtest, свой мини-фреймворк)
-elfio/                — Внешняя библиотека ELFIO (header-only)
+    cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+    cmake --build build
 
+The simulator binary is placed at build/sim.
 
-## Сборка
+### Run
 
-### Требования
-- MSYS2 с установленным mingw-w64-ucrt-x86_64-gcc и mingw-w64-ucrt-x86_64-asmjit.
-- Ruby (>= 3.0).
-- ELFIO — уже в репозитории (elfio/).
+To verify the simulator's functionality, run the Fibonacci example:
 
-### Сборка симулятора
-g++ main.cpp generate_block.cpp elf_loader.cpp -o a -std=c++17 -Wall -I. -lasmjit -O2 -DASMJIT_STATIC -Wno-invalid-offsetof
+1. Assemble the program using asm/dsl.rb:
 
-### Сборка тестов
-g++ tests.cpp -o tests -std=c++17 -Wall -Wextra
-./tests
-Ожидаемо: 41 passed, 0 failed.
+       ruby asm/fib.rb
 
+   This produces output.elf.
 
-## Запуск
+2. Run the simulator on the ELF file:
 
-### 1. Собрать программу ассемблером
-ruby fib.rb                    (создаёт output.elf)
+       printf '10\n' | ./build/sim output.elf
 
-### 2. Запустить интерпретатором
-./a output.elf                 (ввод N -> вывод Fibonacci(N))
+   The program reads N from stdin and prints Fibonacci(N) to stdout.
 
-### 3. Запустить с DBT
-./a output.elf --dbt --threshold 10
+3. Run the same program with the JIT translator enabled:
 
-### 4. Флаги CLI
---bench           Полный бенчмарк (warmup + N замеров по всем порогам)
---interp          Только интерпретатор (без DBT)
---dbt             С DBT (по умолчанию)
---threshold N     Порог горячести (по умолчанию 10)
---runs N          Замеров на конфиг (по умолчанию 6)
---warmup N        Прогревов перед замерами (по умолчанию 2)
+       printf '10\n' | ./build/sim output.elf --dbt --threshold 10
 
+## CLI flags
 
-## Результаты тестирования
+    --dbt             Enable dynamic binary translation (default)
+    --interp          Use interpreter only (no JIT)
+    --threshold N     Hotness threshold for JIT compilation (default 10)
+    --bench           Run full benchmark suite (warmup + N timed runs)
+    --warmup N        Number of warmup runs before timing (default 2)
+    --runs N          Number of timed runs per configuration (default 6)
 
-### Unit-тесты (tests.cpp)
-- 41 проверка, покрытие: decode, execute (все 15 инструкций), исключения
-  (misaligned, OOB), syscall.
-- Изоляция тестов через new_cpu(&mem) — каждый тест на свежем CpuState.
-- 0 failed.
+## Tests
 
-### Self-checking (dsl_tests.rb)
-- 16 тестов прямо на ассемблере: LI, ADD, ADDI, BEQ, J, LD/ST, STP, MOVZ, MOVN,
-  CLS, SSAT, SELC, SBIT.
-- Каждый тест пишет '1' (ok) или '0' (fail) в буфер, в конце выводятся 16 символов.
-- Ожидаемо: 1111111111111111 — все 16 прошли.
+Build and run unit tests for all ISA instructions:
 
+    make tests
 
-## Бенчмарки (DBT vs интерпретатор)
+This compiles tests/tests.cpp and runs the test binary build/tests. Expected output: 41 passed, 0 failed.
 
-Замер через std::chrono::high_resolution_clock, warmup=2, runs=6,
-каждый замер на свежем JitRuntime (чтобы избежать накопления JIT-памяти).
+## Project Structure
 
-### bench.elf — 3M инструкций, 1 горячий цикл
-Интерпретатор      12.78 ms   1.00x
-DBT (T=10)          4.49 ms   2.85x
-DBT (T=25 000)      4.84 ms   2.64x
-Плато — 99% работы в одном блоке. Порог влияет слабо.
+    toy-isa-sim/
+      asm/                    Ruby DSL assembler + example programs
+        dsl.rb                Encoder for all 15 instructions + ELF32 writer
+        fib.rb                Fibonacci example
+        bench.rb              Benchmark: single hot loop
+        bench2.rb             Benchmark: 50 blocks x 20K executions
+        dsl_tests.rb          Self-checking ISA tests
+      include/sim/            Public C++ headers
+      src/                    C++ sources (decoder, executor, JIT, ELF loader)
+      tests/tests.cpp         Unit tests for decode + execute
+      third_party/elfio/      ELFIO (header-only, MIT)
+      CMakeLists.txt
 
-### bench2.elf — 50 блоков × 20K исполнений
-Интерпретатор      40.99 ms   1.00x
-DBT (T=1)           7.17 ms   5.72x
-DBT (T=100)         7.19 ms   5.70x
-DBT (T=1000)        8.50 ms   4.82x
-DBT (T=10000)      24.19 ms   1.69x
-DBT (T=25000)      44.04 ms   0.93x
+## Benchmarks
 
-Плато 5.5-5.7x при T <= 1000. При T=25000 порог выше числа исполнений ->
-ни один блок не транслируется -> полный откат к интерпретатору
-(доказательство, что выигрыш даёт именно трансляция).
+All timings measured with std::chrono::high_resolution_clock on Windows (MinGW-w64 UCRT64), warmup = 2, 6 timed runs, median shown. Each run uses a fresh JitRuntime to avoid accumulated JIT code.
 
-Проверка модели: для T из N=20000 исполнений скорость DBT-кода K≈5.7
-(из плато). Модель Speedup = N/(T+(N−T)/K) предсказывает:
-  T=10000 -> 1.70x   (замер: 1.69x, совпадение 99.4%)
-  T=25000 -> 1.00x   (замер: 0.93x, overhead 7%)
+### bench.elf - 3M instructions, single hot loop
 
-### bench3.elf — hot (20K) + cold (100)
-Смешанная нагрузка, где THRESHOLD — компромисс.
-Оптимум при T=100-1000: hot-блоки транслируются, cold — нет.
-При T=1 — overhead от трансляции cold.
-При T=25000 — полный откат.
+    Mode                      Median (ms)   Speedup
+    Interpreter               12.78         1.00x
+    DBT (threshold=1)          4.55         2.81x
+    DBT (threshold=10)         4.49         2.85x
+    DBT (threshold=1000)       4.57         2.80x
+    DBT (threshold=25000)      4.84         2.64x
 
+99% of the work happens inside a single basic block, so the threshold has little effect - the block is hot enough to be translated at any reasonable threshold.
 
-## Реализованные оптимизации
+### bench2.elf - 50 blocks x 20,000 executions each
 
-### Инлайнинг через AsmJit
-- Все «простые» инструкции (LI, ADDI, ADD, MOVZ, MOVN, SELC, SBIT, BEQ, J,
-  SYSCALL) генерируют x86-код напрямую (2-5 x86-инструкций на 1 Toy-инструкцию).
-- «Сложные» (LD, ST, STP, CLS, SSAT) вызывают C++-хелперы (dbt_*)
+    Mode                       Median (ms)   Speedup   Comment
+    Interpreter                40.99         1.00x     baseline
+    DBT (threshold=1)           7.17         5.72x     all blocks translated
+    DBT (threshold=100)         7.19         5.70x     plateau
+    DBT (threshold=1000)        8.50         4.82x     5% interpreted, 95% JIT
+    DBT (threshold=10000)      24.19         1.69x     50% interpreted
+    DBT (threshold=25000)      44.04         0.93x     threshold > N -> no translation
 
+Model check. With N = 20000 executions per block and a JIT-vs-interpreter speed ratio K ~ 5.7, the predicted speedup is:
 
+    Speedup = N / (T + (N - T) / K)
 
+- For T = 10000: predicted 1.70x, measured 1.69x (99.4% match)
+- For T = 25000: predicted 1.00x, measured 0.93x (7% overhead from threshold checks)
 
+The collapse to 0.93x at T = 25000 confirms that all performance gains come from translation - once no block reaches the threshold, the simulator falls back to pure interpretation.
+
+### bench3.elf - mixed workload (hot loop 20K + cold loop 100)
+
+Demonstrates the threshold trade-off: low thresholds waste time translating cold code, high thresholds fail to translate hot code. Optimal range: T in [100, 1000].
+
+## Implementation notes
+
+- Interpreter: decode -> execute with switch dispatch, sign-extension via setx<From, To>.
+- BB cache: unordered_map<pc, BasicBlock> with exec_count to track hotness.
+- DBT (AsmJit): per-block x86-64 code generation, cached in bt_cache. Simple instructions are inlined; complex ones (LD, ST, STP, CLS, SSAT) call C++ helpers (dbt_*).
+- SMC handling: writes to code memory invalidate any cached translation whose range overlaps the written address.
+- Semihosting: syscall 1 (print int), 2 (read int), 64 (write buffer), 93 (exit).
+
+## License
+
+MIT. See LICENSE for details. ELFIO is distributed under the MIT license.
